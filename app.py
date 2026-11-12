@@ -994,3 +994,96 @@ st.markdown(
     </div>""",
     unsafe_allow_html=True,
 )
+import sqlite3
+import pandas as pd
+import streamlit as st
+
+# 1. Conexión a tu base de datos actual
+def init_paper_db():
+    conn = sqlite3.connect('sports_control_center.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS paper_bets
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  partido TEXT, mercado TEXT, cuota REAL, 
+                  prob_modelo REAL, ev REAL, stake REAL, estado TEXT)''')
+    conn.commit()
+    conn.close()
+
+init_paper_db()
+
+# 2. Pestaña de Paper Trading (Añade esto a tu menú principal)
+st.markdown("---")
+st.header("📝 Paper Trading (Cero API Credits)")
+st.caption("Calcula EV+ y guarda apuestas virtuales usando tu modelo local, sin gastar saldo de The Odds API.")
+
+col_p, col_m = st.columns(2)
+with col_p:
+    partido_manual = st.text_input("Partido", placeholder="Ej: Ath Bilbao vs Espanyol")
+with col_m:
+    mercado_manual = st.selectbox("Mercado", ["1 (Local)", "X (Empate)", "2 (Visitante)", "Más de 2.5", "Menos de 2.5", "Ambos Marcan Sí"])
+
+col_c, col_pr = st.columns(2)
+with col_c:
+    cuota_manual = st.number_input("Cuota de la Casa (Mírala gratis en internet)", min_value=1.01, value=2.00, step=0.05)
+with col_pr:
+    prob_modelo = st.number_input("Probabilidad de tu Modelo local (%)", min_value=0.1, max_value=99.9, value=50.0)
+
+# Cálculo automático de EV y Kelly fraccional
+prob_decimal = prob_modelo / 100
+ev_calculado = (prob_decimal * cuota_manual) - 1
+
+if ev_calculado > 0:
+    stake_kelly = ((prob_decimal * cuota_manual - 1) / (cuota_manual - 1)) * 100
+    stake_recomendado = stake_kelly / 4  # Kelly Fraccional (1/4) para proteger bankroll
+else:
+    stake_recomendado = 0.0
+
+st.info(f"📊 **Análisis Matemático:** EV: {ev_calculado*100:.2f}% | Stake Kelly Recomendado: {stake_recomendado:.2f}%")
+
+if st.button("Guardar Apuesta Virtual en SQLite"):
+    conn = sqlite3.connect('sports_control_center.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO paper_bets (partido, mercado, cuota, prob_modelo, ev, stake, estado) 
+                 VALUES (?, ?, ?, ?, ?, ?, 'Pendiente')''', 
+              (partido_manual, mercado_manual, cuota_manual, prob_modelo, ev_calculado*100, stake_recomendado))
+    conn.commit()
+    conn.close()
+    st.success("✅ Apuesta registrada en tu base de datos.")
+
+# 3. Panel de Rendimiento
+st.markdown("### 📈 Mis Apuestas Virtuales")
+conn = sqlite3.connect('sports_control_center.db')
+df_bets = pd.read_sql_query("SELECT * FROM paper_bets", conn)
+
+if not df_bets.empty:
+    edited_df = st.data_editor(
+        df_bets,
+        column_config={
+            "estado": st.column_config.SelectboxColumn("Estado", options=["Pendiente", "Ganada", "Perdida"])
+        },
+        disabled=["id", "partido", "mercado", "cuota", "prob_modelo", "ev", "stake"],
+        hide_index=True,
+        use_container_width=True
+    )
+    
+    # Actualizar estado en SQLite si se modifica en la tabla
+    for index, row in edited_df.iterrows():
+        if row['estado'] != df_bets.loc[index, 'estado']:
+            c = conn.cursor()
+            c.execute("UPDATE paper_bets SET estado = ? WHERE id = ?", (row['estado'], row['id']))
+            conn.commit()
+            st.rerun()
+
+    # Cálculo de métricas
+    resueltas = edited_df[edited_df['estado'] != 'Pendiente']
+    if not resueltas.empty:
+        ganadas = resueltas[resueltas['estado'] == 'Ganada']
+        invertido = resueltas['stake'].sum()
+        beneficio = (ganadas['stake'] * ganadas['cuota']).sum() - invertido
+        yield_pct = (beneficio / invertido * 100) if invertido > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Unidades Invertidas", f"{invertido:.2f} U")
+        c2.metric("Beneficio Neto", f"{beneficio:.2f} U")
+        c3.metric("Yield", f"{yield_pct:.2f} %")
+conn.close()
